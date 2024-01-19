@@ -22,24 +22,24 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCL
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef TELEOP_TWIST_JOY_TELEOP_TWIST_JOY_H
-#define TELEOP_TWIST_JOY_TELEOP_TWIST_JOY_H
+#ifndef TELEOP_NOVA_JOY_TELEOP_NOVA_JOY_H
+#define TELEOP_NOVA_JOY_TELEOP_NOVA_JOY_H
 
 #include <rclcpp/rclcpp.hpp>
-#include "teleop_twist_joy/teleop_twist_joy_export.h"
+#include "teleop_nova_joy/teleop_nova_joy_export.h"
 
-namespace teleop_twist_joy
+namespace teleop_nova_joy
 {
 
 /**
  * Class implementing a basic Joy -> Twist translation.
  */
-class TELEOP_TWIST_JOY_EXPORT TeleopTwistJoy : public rclcpp::Node
+class TELEOP_NOVA_JOY_EXPORT TeleopNovaJoy : public rclcpp::Node
 {
 public:
-  explicit TeleopTwistJoy(const rclcpp::NodeOptions& options);
+  explicit TeleopNovaJoy(const rclcpp::NodeOptions& options);
 
-  virtual ~TeleopTwistJoy();
+  virtual ~TeleopNovaJoy();
 
 private:
   struct Impl;
@@ -47,6 +47,6 @@ private:
   OnSetParametersCallbackHandle::SharedPtr callback_handle;  
 };
 
-}  // namespace teleop_twist_joy
+}  // namespace teleop_nova_joy
 
-#endif  // TELEOP_TWIST_JOY_TELEOP_TWIST_JOY_H
+#endif  // TELEOP_NOVA_JOY_TELEOP_NOVA_JOY_H

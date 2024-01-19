@@ -34,31 +34,53 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 #include <rclcpp_components/register_node_macro.hpp>
 #include <rcutils/logging_macros.h>
 #include <sensor_msgs/msg/joy.hpp>
+#include <controller_manager_msgs/srv/switch_controller.hpp>
 
-#include "teleop_twist_joy/teleop_twist_joy.hpp"
+#include "teleop_nova_joy/teleop_nova_joy.hpp"
 
 #define ROS_INFO_NAMED RCUTILS_LOG_INFO_NAMED
 #define ROS_INFO_COND_NAMED RCUTILS_LOG_INFO_EXPRESSION_NAMED
 
-namespace teleop_twist_joy
+namespace
+{
+  constexpr auto DEFAULT_INPUT_TOPIC = "/joy";
+  constexpr auto DEFAULT_OUTPUT_TOPIC = "/cmd_vel";
+}
+
+namespace teleop_nova_joy
 {
 
+enum Mode {
+  STRAFE,
+  PIVOT,
+  DIFF
+}
 /**
  * Internal members of class. This is the pimpl idiom, and allows more flexibility in adding
- * parameters later without breaking ABI compatibility, for robots which link TeleopTwistJoy
+ * parameters later without breaking ABI compatibility, for robots which link TeleopNovaJoy
  * directly into base nodes.
  */
-struct TeleopTwistJoy::Impl
+struct TeleopNovaJoy::Impl
 {
   void joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy);
   void sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr, const std::string& which_map);
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub;
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub;
+  rclcpp::Publisher<core::msg::DriveInputStamped>::SharedPtr drive_input_pub;
+  rclcpp::Client<controller_manager_msgs::srv::SwitchController> switch_controller_client;
 
-  bool require_enable_button;
-  int64_t enable_button;
-  int64_t enable_turbo_button;
+  int64_t button_unlock;
+  int64_t button_lock;
+
+  //int64_t button_enable_turbo;
+
+  int64_t button_strafe_mode;
+  int64_t button_pivot_drive_mode;
+  int64_t button_diff_drive_mode;
+
+  int64_t button_autonomous_control;
+  int64_t button_manual_control;
 
   std::map<std::string, int64_t> axis_linear_map;
   std::map<std::string, std::map<std::string, double>> scale_linear_map;
@@ -66,25 +88,28 @@ struct TeleopTwistJoy::Impl
   std::map<std::string, int64_t> axis_angular_map;
   std::map<std::string, std::map<std::string, double>> scale_angular_map;
 
-  bool sent_disable_msg;
+  bool sent_lock_msg;
+  bool locked;
+  bool manual_teleop;
+  Mode mode; 
+  Mode mode_old;
+  
 };
 
 /**
- * Constructs TeleopTwistJoy.
+ * Constructs TeleopNovaJoy.
  */
-TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleop_twist_joy_node", options)
+TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_nova_joy_node", options)
 {
   pimpl_ = new Impl;
 
-  pimpl_->cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
-  pimpl_->joy_sub = this->create_subscription<sensor_msgs::msg::Joy>("joy", rclcpp::QoS(10),
-    std::bind(&TeleopTwistJoy::Impl::joyCallback, this->pimpl_, std::placeholders::_1));
+  pimpl_->cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>(DEFAULT_OUTPUT_TOPIC, 10);
+  pimpl_->joy_sub = this->create_subscription<sensor_msgs::msg::Joy>(DEFAULT_INPUT_TOPIC, rclcpp::QoS(10),
+    std::bind(&TeleopNovaJoy::Impl::joyCallback, this->pimpl_, std::placeholders::_1));
 
-  pimpl_->require_enable_button = this->declare_parameter("require_enable_button", true);
-
-  pimpl_->enable_button = this->declare_parameter("enable_button", 5);
-
-  pimpl_->enable_turbo_button = this->declare_parameter("enable_turbo_button", -1);
+  //declaring default values for parameters
+  pimpl_->button_unlock = this->declare_parameter("button_unlock", 11);
+  pimpl_->button_lock = this->declare_parameter("button_lock", 15);
 
   std::map<std::string, int64_t> default_linear_map{
     {"x", 5L},
@@ -134,42 +159,49 @@ TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleo
   this->declare_parameters("scale_angular_turbo", default_scale_angular_turbo_map);
   this->get_parameters("scale_angular_turbo", pimpl_->scale_angular_map["turbo"]);
 
-  ROS_INFO_COND_NAMED(pimpl_->require_enable_button, "TeleopTwistJoy",
-      "Teleop enable button %" PRId64 ".", pimpl_->enable_button);
-  ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0, "TeleopTwistJoy",
-    "Turbo on button %" PRId64 ".", pimpl_->enable_turbo_button);
+  ROS_INFO_COND_NAMED(pimpl_->unlock, "TeleopNovaJoy",
+      "Teleop unlock button %" PRId64 ".", pimpl_->button_unlock);
+  ROS_INFO_COND_NAMED(pimpl_->unlock, "TeleopNovaJoy",
+      "Teleop lock button %" PRId64 ".", pimpl_->button_lock);
+  /*ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0, "TeleopNovaJoy",
+    "Turbo on button %" PRId64 ".", pimpl_->turbo_button); */
 
   for (std::map<std::string, int64_t>::iterator it = pimpl_->axis_linear_map.begin();
        it != pimpl_->axis_linear_map.end(); ++it)
   {
-    ROS_INFO_COND_NAMED(it->second != -1L, "TeleopTwistJoy", "Linear axis %s on %" PRId64 " at scale %f.",
+    ROS_INFO_COND_NAMED(it->second != -1L, "TeleopNovaJoy", "Linear axis %s on %" PRId64 " at scale %f.",
       it->first.c_str(), it->second, pimpl_->scale_linear_map["normal"][it->first]);
-    ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0 && it->second != -1, "TeleopTwistJoy",
-      "Turbo for linear axis %s is scale %f.", it->first.c_str(), pimpl_->scale_linear_map["turbo"][it->first]);
+    /*ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0 && it->second != -1, "TeleopNovaJoy",
+      "Turbo for linear axis %s is scale %f.", it->first.c_str(), pimpl_->scale_linear_map["turbo"][it->first]); */
   }
 
   for (std::map<std::string, int64_t>::iterator it = pimpl_->axis_angular_map.begin();
        it != pimpl_->axis_angular_map.end(); ++it)
   {
-    ROS_INFO_COND_NAMED(it->second != -1L, "TeleopTwistJoy", "Angular axis %s on %" PRId64 " at scale %f.",
+    ROS_INFO_COND_NAMED(it->second != -1L, "TeleopNovaJoy", "Angular axis %s on %" PRId64 " at scale %f.",
       it->first.c_str(), it->second, pimpl_->scale_angular_map["normal"][it->first]);
-    ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0 && it->second != -1, "TeleopTwistJoy",
-      "Turbo for angular axis %s is scale %f.", it->first.c_str(), pimpl_->scale_angular_map["turbo"][it->first]);
+    /*ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0 && it->second != -1, "TeleopNovaJoy",
+      "Turbo for angular axis %s is scale %f.", it->first.c_str(), pimpl_->scale_angular_map["turbo"][it->first]); */
   }
 
-  pimpl_->sent_disable_msg = false;
+  pimpl_->sent_lock_msg = false;
+  pimpl_->locked = false;
+  pimpl_->mode = PIVOT;
+  pimpl_->mode_old = PIVOT;
+  pimpl_->manual_teleop = true;
 
   auto param_callback =
   [this](std::vector<rclcpp::Parameter> parameters)
   {
     static std::set<std::string> intparams = {"axis_linear.x", "axis_linear.y", "axis_linear.z",
                                               "axis_angular.yaw", "axis_angular.pitch", "axis_angular.roll",
-                                              "enable_button", "enable_turbo_button"};
+                                              "button_unlock", "button_lock", "button_strafe_mode",
+                                              "button_pivot_drive_mode", "button_diff_drive_mode",
+                                              "button_autonomous_control", "button_manual_control"};
     static std::set<std::string> doubleparams = {"scale_linear.x", "scale_linear.y", "scale_linear.z",
-                                                 "scale_linear_turbo.x", "scale_linear_turbo.y", "scale_linear_turbo.z",
-                                                 "scale_angular.yaw", "scale_angular.pitch", "scale_angular.roll",
-                                                 "scale_angular_turbo.yaw", "scale_angular_turbo.pitch", "scale_angular_turbo.roll"};
-    static std::set<std::string> boolparams = {"require_enable_button"};
+                                                 //"scale_linear_turbo.x", "scale_linear_turbo.y", "scale_linear_turbo.z",
+                                                 "scale_angular.yaw", "scale_angular.pitch", "scale_angular.roll"};
+                                                 //"scale_angular_turbo.yaw", "scale_angular_turbo.pitch", "scale_angular_turbo.roll"};
     auto result = rcl_interfaces::msg::SetParametersResult();
     result.successful = true;
 
@@ -196,32 +228,38 @@ TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleo
           return result;
         }
       }
-      else if (boolparams.count(parameter.get_name()) == 1)
-      {
-        if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_BOOL)
-        {
-          result.reason = "Only boolean values can be set for '" + parameter.get_name() + "'.";
-          RCLCPP_WARN(this->get_logger(), result.reason.c_str());
-          result.successful = false;
-          return result;
-        }
-      }
     }
 
     // Loop to assign changed parameters to the member variables
     for (const auto & parameter : parameters)
     {
-      if (parameter.get_name() == "require_enable_button")
+      if (parameter.get_name() == "button_unlock")
       {
-        this->pimpl_->require_enable_button = parameter.get_value<rclcpp::PARAMETER_BOOL>();
+        this->pimpl_->button_unlock = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
       }
-      if (parameter.get_name() == "enable_button")
+      else if (parameter.get_name() == "button_lock")
       {
-        this->pimpl_->enable_button = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
+        this->pimpl_->button_lock = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
       }
-      else if (parameter.get_name() == "enable_turbo_button")
+      else if (parameter.get_name() == "button_strafe_mode")
       {
-        this->pimpl_->enable_turbo_button = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
+        this->pimpl_->button_strafe_mode = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
+      }
+      else if (parameter.get_name() == "button_pivot_drive_mode")
+      {
+        this->pimpl_->button_pivot_drive_mode = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
+      }
+      else if (parameter.get_name() == "button_diff_drive_mode")
+      {
+        this->pimpl_->button_diff_drive_mode = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
+      }
+      else if (parameter.get_name() == "button_autonomous_control")
+      {
+        this->pimpl_->button_autonomous_control = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
+      }
+      else if (parameter.get_name() == "button_manual_control")
+      {
+        this->pimpl_->button_manual_control = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
       }
       else if (parameter.get_name() == "axis_linear.x")
       {
@@ -247,18 +285,6 @@ TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleo
       {
         this->pimpl_->axis_angular_map["roll"] = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
       }
-      else if (parameter.get_name() == "scale_linear_turbo.x")
-      {
-        this->pimpl_->scale_linear_map["turbo"]["x"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
-      }
-      else if (parameter.get_name() == "scale_linear_turbo.y")
-      {
-        this->pimpl_->scale_linear_map["turbo"]["y"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
-      }
-      else if (parameter.get_name() == "scale_linear_turbo.z")
-      {
-        this->pimpl_->scale_linear_map["turbo"]["z"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
-      }
       else if (parameter.get_name() == "scale_linear.x")
       {
         this->pimpl_->scale_linear_map["normal"]["x"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
@@ -271,6 +297,7 @@ TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleo
       {
         this->pimpl_->scale_linear_map["normal"]["z"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
       }
+      /*
       else if (parameter.get_name() == "scale_angular_turbo.yaw")
       {
         this->pimpl_->scale_angular_map["turbo"]["yaw"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
@@ -283,6 +310,7 @@ TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleo
       {
         this->pimpl_->scale_angular_map["turbo"]["roll"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
       }
+      */
       else if (parameter.get_name() == "scale_angular.yaw")
       {
         this->pimpl_->scale_angular_map["normal"]["yaw"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
@@ -302,7 +330,7 @@ TeleopTwistJoy::TeleopTwistJoy(const rclcpp::NodeOptions& options) : Node("teleo
   callback_handle = this->add_on_set_parameters_callback(param_callback);
 }
 
-TeleopTwistJoy::~TeleopTwistJoy()
+TeleopNovaJoy::~TeleopNovaJoy()
 {
   delete pimpl_;
 }
@@ -321,25 +349,47 @@ double getVal(const sensor_msgs::msg::Joy::SharedPtr joy_msg, const std::map<std
   return joy_msg->axes[axis_map.at(fieldname)] * scale_map.at(fieldname);
 }
 
-void TeleopTwistJoy::Impl::sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr joy_msg,
+void TeleopNovaJoy::Impl::sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr joy_msg,
                                          const std::string& which_map)
 {
   // Initializes with zeros by default.
-  auto cmd_vel_msg = std::make_unique<geometry_msgs::msg::Twist>();
+  auto cmd_vel_msg = std::make_unique<core::msg::DriveInputStamped>();
+  auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
 
-  cmd_vel_msg->linear.x = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "x");
-  cmd_vel_msg->linear.y = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "y");
-  cmd_vel_msg->linear.z = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "z");
-  cmd_vel_msg->angular.z = getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "yaw");
-  cmd_vel_msg->angular.y = getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "pitch");
-  cmd_vel_msg->angular.x = getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "roll");
+  auto modeToController = [](int mode) -> std::string {
+    switch (mode) {
+      case STRAFE:
+        return "strafe_controller";
+      case PIVOT:
+        return "pivot_drive_controller";
+      case DIFF:
+        return "diff_drive_controller";
+    }
+  };
 
-  cmd_vel_pub->publish(std::move(cmd_vel_msg));
-  sent_disable_msg = false;
+  if (mode != mode_old)
+  {
+    request->activate_controllers = modeToController(mode);
+    request->deactivate_controllers = modeToController(mode_old);
+    auto result = switch_controller_client->async_send_request(request);
+  }
+
+  mode_old = mode;
+
+  double angular = getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "yaw");
+  cmd_vel_msg->radius = angular == 0 ? INFINITY : 1.0 / pow(abs(angular), 2) - 1;
+  cmd_vel_msg->direction = angular > 0 ? 1 : angular < 0 ? -1 : 0;
+  cmd_vel_msg->speed = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "x");
+  cmd_vel_msg->mode = mode_old;
+
+  drive_input_pub->publish(std::move(cmd_vel_msg));
+
+  sent_lock_msg = false;
 }
 
-void TeleopTwistJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy_msg)
+void TeleopNovaJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy_msg)
 {
+  /*
   if (enable_turbo_button >= 0 &&
       static_cast<int>(joy_msg->buttons.size()) > enable_turbo_button &&
       joy_msg->buttons[enable_turbo_button])
@@ -352,20 +402,71 @@ void TeleopTwistJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr jo
   {
     sendCmdVelMsg(joy_msg, "normal");
   }
+  */
+  if (joy_msg->buttons[button_unlock])
+  {
+    locked = false;
+  } 
+  else if (joy_msg->buttons[button_lock])
+  {
+    locked = true;
+  }
+  
+  if (joy_msg->buttons[autonomous_control])
+  {
+    manual_teleop = false; 
+  }
+  else if (joy_msg->buttons[manual_control])
+  {
+    manual_teleop = true;
+  }
+
+  if (joy_msg->buttons[button_strafe_mode])
+  {
+    mode = STRAFE;
+  }
+  else if (joy_msg->buttons[button_diff_drive_mode])
+  {
+    mode = DIFF;
+  }
+  else if (joy_msg->buttons[button_pivot_drive_mode])
+  {
+    mode = PIVOT;
+  }
+
+  if (!locked && manual_teleop)
+  {
+    sendCmdVelMsg(joy_msg, "normal");
+  }
   else
   {
-    // When enable button is released, immediately send a single no-motion command
+    // When lock button is pressed, immediately send a single no-motion command
     // in order to stop the robot.
-    if (!sent_disable_msg)
+
+    auto cmd_vel_msg;
+
+    if (manual_teleop)
     {
+      if (!sent_lock_msg)
+      {
+        // Initializes with zeros by default.
+        cmd_vel_msg = std::make_unique<core::msg::DriveInputStamped>();
+        drive_input_pub->publish(std::move(cmd_vel_msg));
+
+        sent_lock_msg = true;
+      }
+    }
+    else
+    {
+      //We want to continously publish a zero commmand to override any continuous autonomous messages
+      
       // Initializes with zeros by default.
-      auto cmd_vel_msg = std::make_unique<geometry_msgs::msg::Twist>();
-      cmd_vel_pub->publish(std::move(cmd_vel_msg));
-      sent_disable_msg = true;
+      cmd_vel_msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
+      twist_pub->publish(std::move(cmd_vel_msg));
     }
   }
 }
 
-}  // namespace teleop_twist_joy
+}  // namespace teleop_nova_joy
 
-RCLCPP_COMPONENTS_REGISTER_NODE(teleop_twist_joy::TeleopTwistJoy)
+RCLCPP_COMPONENTS_REGISTER_NODE(teleop_nova_joy::TeleopNovaJoy)

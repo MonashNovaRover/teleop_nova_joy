@@ -4,13 +4,21 @@ teleop_twist_joy_node:
       x: 1
     scale_linear:
       x: 0.7
-    scale_linear_turbo:
-      x: 1.5
+    #scale_linear_turbo:
+    #  x: 1.5
 
     axis_angular:  # Left thumb stick horizontal
       yaw: 0
     scale_angular:
       yaw: 0.4
 
-    enable_button: 2  # Left trigger button
-    enable_turbo_button: 5  # Right trigger button
+    button_unlock: 11  # Unlock gamepad [Menu]
+    button_lock: 15
+    #enable_turbo_button: 5  # Right trigger button
+    
+    button_strafe_mode: 6 #strafe_controller [left_bumper]
+    button_pivot_drive_mode: 7 #pivot_drive_controller [right bumper]
+    button_diff_drive_mode: 4 #diff_drive_controller [Y]
+
+    button_autonomous_control: 0 #set enable_twist_cmd true for pivot_drive_controller
+    button_manual_control: 1 #set enable_twist_cmd false for pivot_drive_controller
