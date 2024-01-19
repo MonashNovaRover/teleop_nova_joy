@@ -30,6 +30,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 #include <string>
 
 #include <geometry_msgs/msg/twist_stamped.hpp>
+#include <core/msg/drive_input_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <rcutils/logging_macros.h>
@@ -40,6 +41,8 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 
 #define ROS_INFO_NAMED RCUTILS_LOG_INFO_NAMED
 #define ROS_INFO_COND_NAMED RCUTILS_LOG_INFO_EXPRESSION_NAMED
+
+using namespace std::chrono_literals;
 
 namespace
 {
@@ -56,7 +59,8 @@ enum Mode {
   STRAFE,
   PIVOT,
   DIFF
-}
+};
+
 /**
  * Internal members of class. This is the pimpl idiom, and allows more flexibility in adding
  * parameters later without breaking ABI compatibility, for robots which link TeleopNovaJoy
@@ -64,13 +68,13 @@ enum Mode {
  */
 struct TeleopNovaJoy::Impl
 {
-  void joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy);
-  void sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr, const std::string& which_map);
+  TeleopNovaJoy& parent_;
 
-  rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub;
+  void joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy);
+  void sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr, const std::string& which_map); rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub;
   rclcpp::Publisher<core::msg::DriveInputStamped>::SharedPtr drive_input_pub;
-  rclcpp::Client<controller_manager_msgs::srv::SwitchController> switch_controller_client;
+  rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_controller_client;
 
   int64_t button_unlock;
   int64_t button_lock;
@@ -103,9 +107,9 @@ struct TeleopNovaJoy::Impl
  */
 TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_nova_joy_node", options)
 {
-  pimpl_ = new Impl;
+  pimpl_ = new Impl {*this};
 
-  pimpl_->drive_input_pub = this->create_publisher<core::msg::DriveInputStamped>(DEFAULT_OUTPUT_TOPIC, 10);
+  pimpl_->drive_input_pub = this->create_publisher<core::msg::DriveInputStamped>(DEFAULT_OUTPUT_TOPIC, 50);
   pimpl_->cmd_vel_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>(DEFAULT_OUTPUT_TOPIC_TWIST, 10);
   pimpl_->joy_sub = this->create_subscription<sensor_msgs::msg::Joy>(DEFAULT_INPUT_TOPIC, rclcpp::QoS(10),
     std::bind(&TeleopNovaJoy::Impl::joyCallback, this->pimpl_, std::placeholders::_1));
@@ -113,6 +117,11 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
   //declaring default values for parameters
   pimpl_->button_unlock = this->declare_parameter("button_unlock", 11);
   pimpl_->button_lock = this->declare_parameter("button_lock", 15);
+  pimpl_->button_manual_control = this->declare_parameter("button_manual_control", 1);
+  pimpl_->button_autonomous_control = this->declare_parameter("button_autonomous_control", 0);
+  pimpl_->button_strafe_mode = this->declare_parameter("button_strafe_mode", 6);
+  pimpl_->button_pivot_drive_mode = this->declare_parameter("button_pivot_drive_mode", 7);
+  pimpl_->button_diff_drive_mode = this->declare_parameter("button_diff_drive_mode", 4);
 
   std::map<std::string, int64_t> default_linear_map{
     {"x", 5L},
@@ -162,9 +171,9 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
   this->declare_parameters("scale_angular_turbo", default_scale_angular_turbo_map);
   this->get_parameters("scale_angular_turbo", pimpl_->scale_angular_map["turbo"]);
 
-  ROS_INFO_COND_NAMED(pimpl_->unlock, "TeleopNovaJoy",
+  ROS_INFO_COND_NAMED(pimpl_->button_unlock, "TeleopNovaJoy",
       "Teleop unlock button %" PRId64 ".", pimpl_->button_unlock);
-  ROS_INFO_COND_NAMED(pimpl_->unlock, "TeleopNovaJoy",
+  ROS_INFO_COND_NAMED(pimpl_->button_unlock, "TeleopNovaJoy",
       "Teleop lock button %" PRId64 ".", pimpl_->button_lock);
   /*ROS_INFO_COND_NAMED(pimpl_->enable_turbo_button >= 0, "TeleopNovaJoy",
     "Turbo on button %" PRId64 ".", pimpl_->turbo_button); */
@@ -236,6 +245,7 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
     // Loop to assign changed parameters to the member variables
     for (const auto & parameter : parameters)
     {
+      RCLCPP_INFO(this->get_logger(), "%s", parameter.get_name());
       if (parameter.get_name() == "button_unlock")
       {
         this->pimpl_->button_unlock = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
@@ -355,6 +365,8 @@ double getVal(const sensor_msgs::msg::Joy::SharedPtr joy_msg, const std::map<std
 void TeleopNovaJoy::Impl::sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr joy_msg,
                                          const std::string& which_map)
 {
+  RCLCPP_INFO(parent_.get_logger(), "sending cmd_vel msg...");
+
   // Initializes with zeros by default.
   auto cmd_vel_msg = std::make_unique<core::msg::DriveInputStamped>();
   auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
@@ -370,20 +382,47 @@ void TeleopNovaJoy::Impl::sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr j
     }
   };
 
+  while (!switch_controller_client->wait_for_service(1s)) {
+    if (!rclcpp::ok()) {
+      RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Interrupted while waiting for the switch_controller service. Exiting.");
+      return;
+    }
+    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "switch_controller service not available, waiting again...");
+  }
+
   if (mode != mode_old)
   {
-    request->activate_controllers = modeToController(mode);
-    request->deactivate_controllers = modeToController(mode_old);
+    request->activate_controllers = {modeToController(mode)};
+    request->deactivate_controllers = {modeToController(mode_old)};
     auto result = switch_controller_client->async_send_request(request);
+
+    /*
+    if (rclcpp::spin_until_future_complete(parent_, result) ==
+        rclcpp::FutureReturnCode::SUCCESS)
+    {
+      RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "%s successfully switched to %s", modeToController(mode_old), modeToController(mode));
+    } else {
+      RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service switch_controller");
+    }
+    */
+
   }
 
   mode_old = mode;
 
   double angular = getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "yaw");
-  cmd_vel_msg->radius = angular == 0 ? INFINITY : 1.0 / pow(abs(angular), 2) - 1;
-  cmd_vel_msg->direction = angular > 0 ? 1 : angular < 0 ? -1 : 0;
-  cmd_vel_msg->speed = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "x");
-  cmd_vel_msg->mode = mode_old;
+  cmd_vel_msg->drive_input.radius = angular == 0 ? INFINITY : 1.0 / pow(abs(angular), 2) - 1;
+  cmd_vel_msg->drive_input.direction = angular > 0 ? 1 : angular < 0 ? -1 : 0;
+  cmd_vel_msg->drive_input.speed = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "x");
+  cmd_vel_msg->drive_input.mode = mode_old;
+
+  //auto current_time = std::chrono::system_clock::now();
+  //auto duration_since_epoch = current_time.time_since_epoch();
+  //auto ros_time_stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(duration_since_epoch);
+
+  //cmd_vel_msg->header.stamp.sec = ros_time_stamp.count() / pow(10, 9);
+  //cmd_vel_msg->header.stamp.nanosec = ros_time_stamp.count() % pow(10, 9);
+  cmd_vel_msg->header.stamp = parent_.now();
 
   drive_input_pub->publish(std::move(cmd_vel_msg));
 
@@ -406,35 +445,48 @@ void TeleopNovaJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy
     sendCmdVelMsg(joy_msg, "normal");
   }
   */
+
   if (joy_msg->buttons[button_unlock])
   {
     locked = false;
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: unlock");
   } 
   else if (joy_msg->buttons[button_lock])
   {
     locked = true;
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: lock");
   }
   
-  if (joy_msg->buttons[autonomous_control])
+  if (joy_msg->buttons[button_autonomous_control])
   {
     manual_teleop = false; 
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: autonomous_control");
+
   }
-  else if (joy_msg->buttons[manual_control])
+  else if (joy_msg->buttons[button_manual_control])
   {
     manual_teleop = true;
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: manual_control");
+
   }
 
   if (joy_msg->buttons[button_strafe_mode])
   {
     mode = STRAFE;
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: strafe_mode");
+
   }
   else if (joy_msg->buttons[button_diff_drive_mode])
   {
     mode = DIFF;
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: diff_drive_mode");
+
   }
   else if (joy_msg->buttons[button_pivot_drive_mode])
   {
     mode = PIVOT;
+    RCLCPP_INFO(parent_.get_logger(), "BUTTON: pivot_drive_mode");
+
   }
 
   if (!locked && manual_teleop)
@@ -446,14 +498,12 @@ void TeleopNovaJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy
     // When lock button is pressed, immediately send a single no-motion command
     // in order to stop the robot.
 
-    auto cmd_vel_msg;
-
     if (manual_teleop)
     {
       if (!sent_lock_msg)
       {
         // Initializes with zeros by default.
-        cmd_vel_msg = std::make_unique<core::msg::DriveInputStamped>();
+        auto cmd_vel_msg = std::make_unique<core::msg::DriveInputStamped>();
         drive_input_pub->publish(std::move(cmd_vel_msg));
 
         sent_lock_msg = true;
@@ -464,7 +514,7 @@ void TeleopNovaJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy
       //We want to continously publish a zero commmand to override any continuous autonomous messages
       
       // Initializes with zeros by default.
-      cmd_vel_msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
+      auto cmd_vel_msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
       cmd_vel_pub->publish(std::move(cmd_vel_msg));
     }
   }
