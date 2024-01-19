@@ -29,7 +29,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 #include <set>
 #include <string>
 
-#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <rcutils/logging_macros.h>
@@ -44,7 +44,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 namespace
 {
   constexpr auto DEFAULT_INPUT_TOPIC = "/joy";
-  constexpr auto DEFAULT_OUTPUT_TOPIC = "/cmd_vel";
+  constexpr auto DEFAULT_OUTPUT_TOPIC = "/drive_input";
+  constexpr auto DEFAULT_OUTPUT_TOPIC_TWIST = "/cmd_vel";
+
 }
 
 namespace teleop_nova_joy
@@ -66,7 +68,7 @@ struct TeleopNovaJoy::Impl
   void sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr, const std::string& which_map);
 
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub;
-  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub;
   rclcpp::Publisher<core::msg::DriveInputStamped>::SharedPtr drive_input_pub;
   rclcpp::Client<controller_manager_msgs::srv::SwitchController> switch_controller_client;
 
@@ -103,7 +105,8 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
 {
   pimpl_ = new Impl;
 
-  pimpl_->cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>(DEFAULT_OUTPUT_TOPIC, 10);
+  pimpl_->drive_input_pub = this->create_publisher<core::msg::DriveInputStamped>(DEFAULT_OUTPUT_TOPIC, 10);
+  pimpl_->cmd_vel_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>(DEFAULT_OUTPUT_TOPIC_TWIST, 10);
   pimpl_->joy_sub = this->create_subscription<sensor_msgs::msg::Joy>(DEFAULT_INPUT_TOPIC, rclcpp::QoS(10),
     std::bind(&TeleopNovaJoy::Impl::joyCallback, this->pimpl_, std::placeholders::_1));
 
@@ -462,7 +465,7 @@ void TeleopNovaJoy::Impl::joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy
       
       // Initializes with zeros by default.
       cmd_vel_msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-      twist_pub->publish(std::move(cmd_vel_msg));
+      cmd_vel_pub->publish(std::move(cmd_vel_msg));
     }
   }
 }
