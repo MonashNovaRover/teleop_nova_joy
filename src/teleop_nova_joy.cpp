@@ -36,6 +36,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 #include <rcutils/logging_macros.h>
 #include <sensor_msgs/msg/joy.hpp>
 #include <controller_manager_msgs/srv/switch_controller.hpp>
+#include <builtin_interfaces/msg/duration.hpp>
 
 #include "teleop_nova_joy/teleop_nova_joy.hpp"
 
@@ -107,7 +108,7 @@ struct TeleopNovaJoy::Impl
  */
 TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_nova_joy_node", options)
 {
-  pimpl_ = new Impl {*this};
+  pimpl_ = new Impl{*this};
 
   pimpl_->drive_input_pub = this->create_publisher<core::msg::DriveInputStamped>(DEFAULT_OUTPUT_TOPIC, 50);
   pimpl_->cmd_vel_pub = this->create_publisher<geometry_msgs::msg::TwistStamped>(DEFAULT_OUTPUT_TOPIC_TWIST, 10);
@@ -123,6 +124,12 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
   pimpl_->button_pivot_drive_mode = this->declare_parameter("button_pivot_drive_mode", 7);
   pimpl_->button_diff_drive_mode = this->declare_parameter("button_diff_drive_mode", 4);
 
+  pimpl_->switch_controller_client = this->create_client<controller_manager_msgs::srv::SwitchController>("switch_controller");
+
+  if (!pimpl_->switch_controller_client->wait_for_service(std::chrono::seconds(1))) {
+    RCLCPP_ERROR(this->get_logger(), "SwitchController service not available.");
+  }
+
   std::map<std::string, int64_t> default_linear_map{
     {"x", 5L},
     {"y", -1L},
@@ -130,6 +137,8 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
   };
   this->declare_parameters("axis_linear", default_linear_map);
   this->get_parameters("axis_linear", pimpl_->axis_linear_map);
+
+  RCLCPP_INFO(this->get_logger(), "axis_linear[x]: %ld", pimpl_->axis_linear_map["x"]);
 
   std::map<std::string, int64_t> default_angular_map{
     {"yaw", 2L},
@@ -245,7 +254,7 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
     // Loop to assign changed parameters to the member variables
     for (const auto & parameter : parameters)
     {
-      RCLCPP_INFO(this->get_logger(), "%s", parameter.get_name());
+      RCLCPP_INFO(this->get_logger(), "New parameter set: %s", parameter.get_name());
       if (parameter.get_name() == "button_unlock")
       {
         this->pimpl_->button_unlock = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
@@ -297,9 +306,7 @@ TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : Node("teleop_
       else if (parameter.get_name() == "axis_angular.roll")
       {
         this->pimpl_->axis_angular_map["roll"] = parameter.get_value<rclcpp::PARAMETER_INTEGER>();
-      }
-      else if (parameter.get_name() == "scale_linear.x")
-      {
+      } else if (parameter.get_name() == "scale_linear.x") {
         this->pimpl_->scale_linear_map["normal"]["x"] = parameter.get_value<rclcpp::PARAMETER_DOUBLE>();
       }
       else if (parameter.get_name() == "scale_linear.y")
@@ -365,10 +372,11 @@ double getVal(const sensor_msgs::msg::Joy::SharedPtr joy_msg, const std::map<std
 void TeleopNovaJoy::Impl::sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr joy_msg,
                                          const std::string& which_map)
 {
-  RCLCPP_INFO(parent_.get_logger(), "sending cmd_vel msg...");
+  //RCLCPP_INFO(parent_.get_logger(), "sending cmd_vel msg...");
 
   // Initializes with zeros by default.
   auto cmd_vel_msg = std::make_unique<core::msg::DriveInputStamped>();
+
   auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
 
   auto modeToController = [](int mode) -> std::string {
@@ -378,42 +386,48 @@ void TeleopNovaJoy::Impl::sendCmdVelMsg(const sensor_msgs::msg::Joy::SharedPtr j
       case PIVOT:
         return "pivot_drive_controller";
       case DIFF:
-        return "diff_drive_controller";
+        return "nova_diff_drive_controller";
     }
   };
 
-  while (!switch_controller_client->wait_for_service(1s)) {
-    if (!rclcpp::ok()) {
-      RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Interrupted while waiting for the switch_controller service. Exiting.");
-      return;
-    }
-    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "switch_controller service not available, waiting again...");
-  }
+  RCLCPP_INFO(parent_.get_logger(), "Current mode: %s", modeToController(mode).c_str());
 
   if (mode != mode_old)
   {
-    request->activate_controllers = {modeToController(mode)};
-    request->deactivate_controllers = {modeToController(mode_old)};
-    auto result = switch_controller_client->async_send_request(request);
-
+    RCLCPP_INFO(parent_.get_logger(), "Changing from %s to %s", modeToController(mode_old).c_str(), modeToController(mode).c_str());
+    request->activate_controllers.push_back(modeToController(mode));
+    request->deactivate_controllers.push_back(modeToController(mode_old));
     /*
-    if (rclcpp::spin_until_future_complete(parent_, result) ==
-        rclcpp::FutureReturnCode::SUCCESS)
-    {
-      RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "%s successfully switched to %s", modeToController(mode_old), modeToController(mode));
-    } else {
-      RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service switch_controller");
-    }
+    request->strictness = controller_manager_msgs::srv::SwitchController::Request::BEST_EFFORT;
+    request->start_asap = true;
+    builtin_interfaces::msg::Duration duration;
+    duration.sec = 3;
+    request->timeout = duration;
     */
 
+    auto future = switch_controller_client->async_send_request(request);
+
+    auto status = future.wait_for(3s);
+    if (status == std::future_status::ready)
+    {
+      RCLCPP_INFO(parent_.get_logger(), "SwitchController service call successful.");
+    }
+    else
+    {
+      RCLCPP_ERROR(parent_.get_logger(), "SwitchController service call failed.");
+    }
   }
 
   mode_old = mode;
 
-  double angular = getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "yaw");
-  cmd_vel_msg->drive_input.radius = angular == 0 ? INFINITY : 1.0 / pow(abs(angular), 2) - 1;
+  double angular = -getVal(joy_msg, axis_angular_map, scale_angular_map[which_map], "yaw");
+  double linear = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "x");
+
+  RCLCPP_INFO(parent_.get_logger(), "angular: %f, linear: %f", angular, linear);
+
+  cmd_vel_msg->drive_input.radius = angular == 0 ? INFINITY : (1.0 / pow(abs(angular), 2)) - 1;
   cmd_vel_msg->drive_input.direction = angular > 0 ? 1 : angular < 0 ? -1 : 0;
-  cmd_vel_msg->drive_input.speed = getVal(joy_msg, axis_linear_map, scale_linear_map[which_map], "x");
+  cmd_vel_msg->drive_input.speed = linear;
   cmd_vel_msg->drive_input.mode = mode_old;
 
   //auto current_time = std::chrono::system_clock::now();
