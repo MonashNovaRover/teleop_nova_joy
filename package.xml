@@ -11,6 +11,8 @@
   <author email="mpurvis@clearpathrobotics.com">Mike Purvis</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>generate_parameter_library</buildtool_depend>
+
 
   <depend>geometry_msgs</depend>
   <depend>rclcpp</depend>

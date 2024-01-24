@@ -28,8 +28,8 @@ def generate_launch_description():
                 'autorepeat_rate': 20.0,
             }]),
         launch_ros.actions.Node(
-            package='teleop_nova_joy', executable='teleop_node',
-            name='teleop_nova_joy_node', parameters=[config_filepath],
+            package='teleop_nova_joy', executable='teleop_nova_joy_node',
+            name='teleop_nova_joy_node',# parameters=[config_filepath],
             remappings={('/cmd_vel', launch.substitutions.LaunchConfiguration('joy_vel'))},
             ),
     ])
