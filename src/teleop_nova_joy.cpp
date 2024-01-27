@@ -68,7 +68,7 @@ namespace teleop_nova_joy
   TeleopNovaJoy::TeleopNovaJoy(const rclcpp::NodeOptions& options) : node_{ std::make_shared<rclcpp::Node>("teleop_nova_joy_node_", options)}
   {
     drive_input_pub = node_->create_publisher<core::msg::DriveInputStamped>(DEFAULT_OUTPUT_TOPIC, 50);
-    cmd_vel_pub = node_->create_publisher<geometry_msgs::msg::TwistStamped>(DEFAULT_OUTPUT_TOPIC_TWIST, 10);
+    cmd_vel_pub = node_->create_publisher<geometry_msgs::msg::TwistStamped>(DEFAULT_OUTPUT_TOPIC_TWIST, 50);
     
     joy_sub = node_->create_subscription<sensor_msgs::msg::Joy>(DEFAULT_INPUT_TOPIC, rclcpp::QoS(10), std::bind(&TeleopNovaJoy::joyCallback, this, _1));
 
@@ -109,7 +109,7 @@ namespace teleop_nova_joy
 
     auto request = std::make_shared<controller_manager_msgs::srv::SwitchController::Request>();
 
-    auto modeToController = [](int mode) -> std::string {
+    auto modeToController = [](Mode mode) -> std::string {
       switch (mode) {
         case STRAFE:
           return "strafe_controller";
@@ -125,25 +125,35 @@ namespace teleop_nova_joy
     if (mode != mode_old)
     {
       RCLCPP_INFO(node_->get_logger(), "Changing from %s to %s", modeToController(mode_old).c_str(), modeToController(mode).c_str());
-      request->activate_controllers.push_back(modeToController(mode));
-      request->deactivate_controllers.push_back(modeToController(mode_old));
+      std::string activate_controller = modeToController(mode);
+      std::string deactivate_controller = modeToController(mode_old);
+
+
+      request->activate_controllers.emplace_back(activate_controller);
+      request->deactivate_controllers.emplace_back(deactivate_controller);
+      request->strictness = 2;
+      //request->start_asap = false;
+      builtin_interfaces::msg::Duration duration;
+      duration.sec = 0.0;
+      duration.nanosec = 0.0;
+      request->timeout = duration;
+      
+      while (!switch_controller_client->wait_for_service(1s))
+      {
+        if (!rclcpp::ok())
+        {
+          RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for the service. Exiting.");
+        }
+        RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "service not available, waiting again...");
+      }
 
       auto future = switch_controller_client->async_send_request(request);
 
-      if (rclcpp::spin_until_future_complete(node_,future) != rclcpp::FutureReturnCode::SUCCESS)
+      if (future.wait_for(0s) != std::future_status::ready)
+      //if (rclcpp::spin_until_future_complete(node_,future) != rclcpp::FutureReturnCode::SUCCESS)
       {
         RCLCPP_ERROR(node_->get_logger(), "service call failed :(");
       }
-
-      //auto status = future.wait_for(3s);
-      //if (status == std::future_status::ready)
-      //{
-      //  RCLCPP_INFO(node_->get_logger(), "SwitchController service call successful.");
-      //}
-      //else
-      //{
-      //  RCLCPP_ERROR(node_->get_logger(), "SwitchController service call failed.");
-      //}
     }
 
     mode_old = mode;
@@ -154,7 +164,7 @@ namespace teleop_nova_joy
     //RCLCPP_INFO(node_->get_logger(), "angular: %f, linear: %f", angular, linear);
 
     cmd_vel_msg->drive_input.radius = angular == 0 ? INFINITY : (1.0 / pow(abs(angular), 2)) - 1;
-    cmd_vel_msg->drive_input.direction = angular > 0 ? 1 : angular < 0 ? -1 : 0;
+    cmd_vel_msg->drive_input.direction = angular > 0 ? -1 : angular < 0 ? 1 : 0;
     cmd_vel_msg->drive_input.speed = linear;
     cmd_vel_msg->drive_input.mode = mode_old;
 
