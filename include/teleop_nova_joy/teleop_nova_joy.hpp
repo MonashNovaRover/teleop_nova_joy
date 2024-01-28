@@ -29,6 +29,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 #include <sensor_msgs/msg/joy.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <core/msg/drive_input_stamped.hpp>
+#include <core/msg/drive_info.hpp>
 #include <controller_manager_msgs/srv/switch_controller.hpp>
 
 
@@ -56,20 +57,16 @@ namespace teleop_nova_joy
 
     rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub;
     rclcpp::Publisher<core::msg::DriveInputStamped>::SharedPtr drive_input_pub;
+    rclcpp::Publisher<core::msg::DriveInfo>::SharedPtr drive_info_pub;
     rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_controller_client;
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub;
+    rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr parameters_client;
 
-    enum Mode {
-      STRAFE,
-      PIVOT,
-      DIFF
-    };
-
-    bool locked;
-    bool manual_teleop;
     bool sent_lock_msg;
-    Mode mode;
-    Mode mode_old;
+    core::msg::DriveInfo current_state;
+    core::msg::DriveInfo previous_state;
+
+    bool speed_change_button_pressed; 
 
     std::map<std::string, int64_t> axis_linear_map{
       {"x", 1L},
@@ -83,8 +80,6 @@ namespace teleop_nova_joy
     std::map<std::string, std::map<std::string, double>> scale_angular_map;
 
   };
-
-
 }  // namespace teleop_nova_joy
 
 #endif  // TELEOP_NOVA_JOY_TELEOP_NOVA_JOY_H
